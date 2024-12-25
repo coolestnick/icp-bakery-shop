@@ -20,11 +20,14 @@ type Result = variant { Ok : Product; Err : Error };
 type Result_1 = variant { Ok : nat32; Err : Error };
 type StockPayload = record { amount : nat32 };
 service : {
-  add_product : (ProductPayload) -> (opt Product);
+  add_product : (ProductPayload) -> (Result);
   add_quantity : (nat64, StockPayload) -> (Result);
+  clear_all_products : () -> ();
   get_product : (nat64) -> (Result) query;
   get_stock : (nat64) -> (Result_1) query;
+  list_all_products : () -> (vec Product) query;
   offload_quantity : (nat64, StockPayload) -> (Result);
   remove_product : (nat64) -> (Result);
+  search_by_category : (Category) -> (vec Product) query;
   update_product : (nat64, ProductPayload) -> (Result);
 }

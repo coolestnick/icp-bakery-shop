@@ -9,7 +9,7 @@ use std::{borrow::Cow, cell::RefCell};
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 type IdCell = Cell<u64, Memory>;
 
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
+#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 enum Category {
     #[default]
     Bakery,
@@ -74,6 +74,25 @@ struct StockPayload {
     amount: u32,
 }
 
+// Custom error handling enum
+#[derive(candid::CandidType, Deserialize, Serialize)]
+enum Error {
+    NotFound { msg: String },
+    InvalidOperation { msg: String },
+}
+
+// Utility function to generate unique IDs
+fn generate_unique_id() -> Result<u64, Error> {
+    ID_COUNTER
+        .with(|counter| {
+            let current_value = *counter.borrow().get();
+            counter.borrow_mut().set(current_value + 1)
+        })
+        .map_err(|_| Error::InvalidOperation {
+            msg: "Failed to generate a unique ID.".to_string(),
+        })
+}
+
 // Function to validate ProductPayload inputs
 fn validate_product_payload(payload: &ProductPayload) -> Result<(), Error> {
     if payload.name.trim().is_empty() {
@@ -133,53 +152,43 @@ fn do_insert(product: &Product) {
 
 // Function to add a new product to the storage
 #[ic_cdk::update]
-fn add_product(product: ProductPayload) -> Result<Product, Error> {
-    // Validate payload before processing
-    validate_product_payload(&product)?;
+fn add_product(payload: ProductPayload) -> Result<Product, Error> {
+    validate_product_payload(&payload)?;
 
-    // Generate a unique ID for the product
-    let id = ID_COUNTER
-        .with(|counter| {
-            let current_value = *counter.borrow().get();
-            counter.borrow_mut().set(current_value + 1)
-        })
-        .expect("Cannot increment id counter");
-    
-    // Create a new Product instance
-    let item = Product {
+    let id = generate_unique_id()?;
+    let product = Product {
         id,
-        name: product.name,
-        category: product.category, 
-        quantity: product.quantity,
+        name: payload.name,
+        category: payload.category,
+        quantity: payload.quantity,
         created_at: time(),
         updated_at: None,
     };
 
-    // Insert the new product into storage
-    do_insert(&item);
-    Ok(item)
+    STORAGE.with(|service| service.borrow_mut().insert(product.id, product.clone()));
+    Ok(product)
 }
 
 // Function to update an existing product's details
 #[ic_cdk::update]
 fn update_product(id: u64, payload: ProductPayload) -> Result<Product, Error> {
-    // Validate payload before processing
     validate_product_payload(&payload)?;
 
-    // Update the product if it exists in storage
-    match STORAGE.with(|service| service.borrow().get(&id)) {
-        Some(mut product) => {
+    STORAGE.with(|service| {
+        let mut storage = service.borrow_mut();
+        if let Some(mut product) = storage.get(&id) {
             product.name = payload.name;
             product.category = payload.category;
             product.quantity = payload.quantity;
             product.updated_at = Some(time());
-            do_insert(&product);
+            storage.insert(id, product.clone());
             Ok(product)
+        } else {
+            Err(Error::NotFound {
+                msg: format!("Product with id={} not found", id),
+            })
         }
-        None => Err(Error::NotFound {
-            msg: format!("Couldn't update a product with id={}. Product not found", id),
-        }),
-    }
+    })
 }
 
 // Function to add stock to a product's quantity
@@ -199,6 +208,18 @@ fn add_quantity(id: u64, payload: StockPayload) -> Result<Product, Error> {
             msg: format!("Couldn't add quantity to product with id={}. Product not found", id),
         }),
     }
+}
+
+#[ic_cdk::query]
+fn search_by_category(category: Category) -> Vec<Product> {
+    STORAGE.with(|service| {
+        service
+            .borrow()
+            .iter()
+            .filter(|(_, product)| product.category == category) // Compare with dereferencing
+            .map(|(_, product)| product.clone()) // Clone to move into Vec
+            .collect()
+    })
 }
 
 // Function to remove stock from a product's quantity
@@ -232,22 +253,32 @@ fn offload_quantity(id: u64, payload: StockPayload) -> Result<Product, Error> {
     }
 }
 
+// Function to get all products
+#[ic_cdk::query]
+fn list_all_products() -> Vec<Product> {
+    STORAGE.with(|service| service.borrow().iter().map(|(_, product)| product).collect())
+}
+
+// Function to clear all products
+#[ic_cdk::update]
+fn clear_all_products() {
+    STORAGE.with(|service| {
+        let keys: Vec<u64> = service.borrow().iter().map(|(key, _)| key).collect();
+        let mut storage = service.borrow_mut();
+        for key in keys {
+            storage.remove(&key);
+        }
+    });
+}
+
 // Function to remove a product from storage
 #[ic_cdk::update]
 fn remove_product(id: u64) -> Result<Product, Error> {
-    match STORAGE.with(|service| service.borrow_mut().remove(&id)) {
-        Some(product) => Ok(product),
-        None => Err(Error::NotFound {
+    STORAGE.with(|service| {
+        service.borrow_mut().remove(&id).ok_or(Error::NotFound {
             msg: format!("Couldn't delete a product with id={}. Product not found", id),
-        }),
-    }
-}
-
-// Custom error handling enum
-#[derive(candid::CandidType, Deserialize, Serialize)]
-enum Error {
-    NotFound { msg: String },
-    InvalidOperation { msg: String },
+        })
+    })
 }
 
 // Export candid interface
